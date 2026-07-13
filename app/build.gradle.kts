@@ -55,8 +55,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     
     // KSP dependencies
-    ksp("androidx.room:room-compiler:2.6.1")
-    ksp("com.google.dagger:hilt-compiler:2.50")
+    ksp("androidx.room:room-compiler:2.6.2")
+    ksp("com.google.dagger:hilt-compiler:2.51")
     
     // Testing
     testImplementation("junit:junit:4.13.2")
