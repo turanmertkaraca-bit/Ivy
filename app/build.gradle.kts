@@ -54,9 +54,9 @@ dependencies {
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     
-    // KSP dependencies (ensure these are compatible)
-    // Add annotation processors that you're using
-    // Example: ksp("com.google.dagger:hilt-compiler:2.50")
+    // KSP dependencies
+    ksp("androidx.room:room-compiler:2.6.1")
+    ksp("com.google.dagger:hilt-compiler:2.50")
     
     // Testing
     testImplementation("junit:junit:4.13.2")
