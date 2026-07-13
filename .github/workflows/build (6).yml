@@ -1,0 +1,409 @@
+name: Build AnimeStream APK
+
+#
+# Self-extracting build workflow with automatic libmpv setup.
+#
+# Flow:
+#   1. Find & extract project .zip (if present)
+#   2. Verify project files exist
+#   3. Download libmpv.so + libplayer.so from mpv-android releases
+#   4. Fetch all shader files
+#   5. Build the APK
+#   6. Upload APK as artifact
+#   7. (OPTIONAL, last step) Commit extracted files back to repo
+#
+# The commit-back step is LAST and non-fatal — even if it fails (permissions,
+# branch protection, etc.), the APK is already built and uploaded.
+#
+# If the commit step fails repeatedly, either:
+#   - Fix repo permissions: Settings → Actions → General → Workflow permissions
+#     → "Read and write permissions"
+#   - Or just ignore it — the build works fine without it (the zip gets
+#     re-extracted on every run, which takes ~1 second)
+#
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'Direct URL to AnimeStream.zip (optional — overrides repo zip)'
+        required: false
+        type: string
+
+jobs:
+  build:
+    name: Build arm64-v8a APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Show what's in the repo right now
+        run: |
+          echo "=============================================="
+          echo "=== FILES IN REPO AT START OF WORKFLOW ==="
+          echo "=============================================="
+          find . -maxdepth 3 -not -path './.git/*' -type f | sort
+          echo ""
+          echo "=== Looking for .zip files anywhere in repo ==="
+          find . -name '*.zip' -not -path './.git/*' 2>/dev/null || echo "(no zip files found)"
+
+      # ====================================================================
+      # STEP 1: OBTAIN PROJECT FILES
+      # ====================================================================
+      - name: Obtain project files
+        id: obtain
+        run: |
+          set +e
+
+          echo "=============================================="
+          echo "=== STEP 1: OBTAIN PROJECT FILES ==="
+          echo "=============================================="
+
+          # --- Approach A: Download from zip_url input (manual trigger) ---
+          ZIP_URL_INPUT="${{ github.event.inputs.zip_url }}"
+          if [ -n "$ZIP_URL_INPUT" ]; then
+            echo "Manual trigger with ZIP_URL: $ZIP_URL_INPUT"
+            curl -fSL -A "Mozilla/5.0" -o /tmp/downloaded.zip "$ZIP_URL_INPUT"
+            if [ $? -eq 0 ] && [ -s /tmp/downloaded.zip ]; then
+              echo "Downloaded zip ($(du -h /tmp/downloaded.zip | cut -f1))"
+              unzip -o /tmp/downloaded.zip
+              echo "obtained=true" >> $GITHUB_OUTPUT
+              exit 0
+            else
+              echo "Download failed or empty zip"
+            fi
+          fi
+
+          # --- Approach B: Find and extract .zip already in repo ---
+          echo ""
+          echo "Searching for .zip files in repo..."
+          ZIP_FILE=""
+
+          if ls *.zip >/dev/null 2>&1; then
+            ZIP_FILE=$(ls -S *.zip | head -1)
+            echo "Found zip in root: $ZIP_FILE"
+          else
+            echo "No zip in root — searching subdirectories..."
+            FOUND=$(find . -name '*.zip' -not -path './.git/*' -not -path './.github/*' 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then
+              ZIP_FILE="$FOUND"
+              echo "Found zip in subdirectory: $ZIP_FILE"
+            fi
+          fi
+
+          if [ -n "$ZIP_FILE" ]; then
+            echo ""
+            echo "=== Extracting $ZIP_FILE ==="
+            echo "Zip size: $(du -h "$ZIP_FILE" | cut -f1)"
+            echo "Zip contents (first 30 entries):"
+            unzip -l "$ZIP_FILE" | head -35
+            echo ""
+            echo "=== Running unzip ==="
+            unzip -o "$ZIP_FILE"
+            UNZIP_EXIT=$?
+            echo "unzip exit code: $UNZIP_EXIT"
+
+            # Check if zip extracted into a single top-level folder
+            TOP_DIR=$(find . -maxdepth 1 -type d ! -path '.' ! -path './.git' ! -path './.github' 2>/dev/null | head -1)
+            if [ -n "$TOP_DIR" ] && [ -f "$TOP_DIR/build.gradle.kts" ] && [ ! -f "./build.gradle.kts" ]; then
+              echo ""
+              echo "Zip nested under '$TOP_DIR' — lifting contents to repo root"
+              cp -r "$TOP_DIR"/* . 2>/dev/null || true
+              cp -r "$TOP_DIR"/.github/* .github/ 2>/dev/null || true
+              cp "$TOP_DIR"/.gitignore . 2>/dev/null || true
+              rm -rf "$TOP_DIR"
+            fi
+
+            # Don't remove the zip — keep it in case the commit step later wants to track it
+            # (Actually, remove it so it doesn't interfere with the build)
+            rm -f "$ZIP_FILE"
+            echo "obtained=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # --- Approach C: Already extracted ---
+          if [ -f "./build.gradle.kts" ]; then
+            echo ""
+            echo "No zip found, but build.gradle.kts exists — files already extracted"
+            echo "obtained=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # --- Failure ---
+          echo ""
+          echo "============================================"
+          echo "ERROR: Could not obtain project files!"
+          echo "============================================"
+          echo "No .zip found in repo and no build.gradle.kts present."
+          echo ""
+          echo "To fix this:"
+          echo "  1. Upload AnimeStream.zip to the repo root via the GitHub web UI"
+          echo "     (Add file → Upload files → drag the zip in → commit)"
+          echo "  2. Re-run this workflow (Actions tab → click the run → Re-run jobs)"
+          echo ""
+          echo "OR: trigger this workflow manually with a direct ZIP URL:"
+          echo "  Actions tab → 'Build AnimeStream APK' → Run workflow → paste zip URL"
+
+          echo "obtained=false" >> $GITHUB_OUTPUT
+
+      - name: Verify project files are present
+        run: |
+          echo "=============================================="
+          echo "=== VERIFYING PROJECT FILES ==="
+          echo "=============================================="
+
+          if [ ! -f "./build.gradle.kts" ]; then
+            echo ""
+            echo "FATAL: build.gradle.kts NOT FOUND in repo root after extraction!"
+            echo ""
+            echo "Files currently in repo root:"
+            ls -la
+            echo ""
+            echo "This means the zip was not found or not extracted properly."
+            echo "See the 'Obtain project files' step above for details."
+            exit 1
+          fi
+
+          echo "OK: build.gradle.kts found"
+          echo ""
+          echo "=== Project structure (top 40 files) ==="
+          find . -type f -not -path './.git/*' -not -path './.github/*' | head -40 | sort
+          echo ""
+          echo "=== Kotlin source files ==="
+          find app/src/main/java -name '*.kt' 2>/dev/null | sort
+          echo ""
+          echo "Kotlin file count: $(find app/src/main/java -name '*.kt' 2>/dev/null | wc -l)"
+
+      # ====================================================================
+      # STEP 2: Set up build tools
+      # ====================================================================
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.9'
+
+      - name: Fix script permissions
+        run: |
+          find . -name "*.sh" -exec chmod +x {} \;
+          chmod +x ./gradlew || true
+
+      - name: Generate gradlew wrapper if missing
+        run: |
+          if [ ! -f ./gradlew ]; then
+            echo "gradlew missing — generating wrapper"
+            gradle wrapper --gradle-version 8.9
+            chmod +x ./gradlew
+          fi
+          ls -la ./gradlew
+
+      # ====================================================================
+      # STEP 3: Download libmpv + libplayer from mpv-android releases
+      # ====================================================================
+      - name: Download libmpv native libraries
+        id: libmpv
+        run: |
+          set -e
+          echo "=== Checking existing .so files ==="
+          if [ -f app/src/main/jniLibs/arm64-v8a/libmpv.so ] && [ -f app/src/main/jniLibs/arm64-v8a/libplayer.so ]; then
+            echo "libmpv.so + libplayer.so already present — skipping download"
+            echo "skipped=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "skipped=false" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "=== Fetching latest mpv-android release tag ==="
+          LATEST_TAG=$(curl -fsSL -A "Mozilla/5.0" \
+            "https://github.com/mpv-android/mpv-android/releases.atom" \
+            | grep -oE '<link rel="alternate"[^>]*tag/[^"]+' | head -1 | sed 's|.*/tag/||')
+          if [ -z "$LATEST_TAG" ]; then
+            echo "ERROR: Could not determine latest mpv-android release tag"
+            exit 1
+          fi
+          echo "Latest release tag: $LATEST_TAG"
+
+          echo ""
+          echo "=== Downloading arm64-v8a release APK ==="
+          APK_URL=""
+          for pattern in "app-default-arm64-v8a-release.apk" "mpv-android-arm64-v8a.apk" "app-arm64-v8a-release.apk" "app-default-arm64-v8a-debug.apk"; do
+            URL="https://github.com/mpv-android/mpv-android/releases/download/${LATEST_TAG}/${pattern}"
+            echo "Trying: $URL"
+            HTTP_CODE=$(curl -sSL -A "Mozilla/5.0" -o /dev/null -w "%{http_code}" --head "$URL" 2>/dev/null)
+            echo "  HTTP $HTTP_CODE"
+            if [ "$HTTP_CODE" = "200" ]; then
+              APK_URL="$URL"
+              echo "  FOUND"
+              break
+            fi
+          done
+
+          if [ -z "$APK_URL" ]; then
+            echo "WARNING: Could not find arm64-v8a APK — trying universal-debug"
+            APK_URL="https://github.com/mpv-android/mpv-android/releases/download/${LATEST_TAG}/app-default-universal-debug.apk"
+          fi
+
+          mkdir -p /tmp/mpv-apk
+          echo ""
+          echo "Downloading: $APK_URL"
+          curl -fSL -A "Mozilla/5.0" -o /tmp/mpv-apk/mpv.apk "$APK_URL"
+          echo "Downloaded: $(du -h /tmp/mpv-apk/mpv.apk | cut -f1)"
+
+          echo ""
+          echo "=== Native libraries in APK ==="
+          unzip -l /tmp/mpv-apk/mpv.apk | grep -E 'lib/arm64-v8a/.*\.so$'
+
+          echo ""
+          echo "=== Extracting .so files into project ==="
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          cd app/src/main/jniLibs/arm64-v8a
+          unzip -j -o /tmp/mpv-apk/mpv.apk "lib/arm64-v8a/*.so"
+          cd -
+
+          echo ""
+          echo "=== Final .so inventory ==="
+          ls -la app/src/main/jniLibs/arm64-v8a/
+
+          if [ ! -f app/src/main/jniLibs/arm64-v8a/libmpv.so ]; then
+            echo "FATAL: libmpv.so not found after extraction"
+            exit 1
+          fi
+          if [ ! -f app/src/main/jniLibs/arm64-v8a/libplayer.so ]; then
+            echo "FATAL: libplayer.so not found after extraction"
+            exit 1
+          fi
+          echo ""
+          echo "OK — libmpv.so and libplayer.so present"
+
+      # ====================================================================
+      # STEP 4: Fetch shaders
+      # ====================================================================
+      - name: Fetch shaders
+        run: |
+          if [ -f fetch_shaders.sh ]; then
+            bash fetch_shaders.sh
+          else
+            echo "WARNING: fetch_shaders.sh not found"
+          fi
+
+      # ====================================================================
+      # STEP 5: Build the APK
+      # ====================================================================
+      - name: Build debug APK
+        id: build
+        run: |
+          ./gradlew :app:assembleDebug --stacktrace --no-daemon --warning-mode=all 2>&1 | tee build.log
+          echo "build_status=success" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Print first 30 errors on failure
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "=========================================="
+          echo "=== BUILD FAILED — first 30 error lines ==="
+          echo "=========================================="
+          grep -iE "(error:|exception|cannot find|unresolved|FAILURE:)" build.log | head -30 || true
+          echo ""
+          echo "=== Last 200 lines of build log ==="
+          tail -200 build.log
+
+      - name: Fail job if build failed
+        if: steps.build.outcome == 'failure'
+        run: exit 1
+
+      - name: Locate built APK
+        id: apk
+        run: |
+          APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" 2>/dev/null | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "No APK found"
+            find app/build -name "*.apk" 2>/dev/null || true
+            exit 1
+          fi
+          echo "APK: $APK_PATH"
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+
+      - name: Rename APK
+        run: |
+          mkdir -p artifacts
+          cp "${{ steps.apk.outputs.apk_path }}" artifacts/animestream-arm64-debug.apk
+          ls -la artifacts/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: animestream-arm64-apk
+          path: artifacts/animestream-arm64-debug.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
+
+      # ====================================================================
+      # STEP 6 (OPTIONAL, LAST): Commit extracted files back to repo
+      # This is the ONLY step that needs write permissions.
+      # If it fails, the APK is already built and uploaded — no harm done.
+      # ====================================================================
+      - name: Commit extracted files back to repo (optional)
+        if: success() && steps.obtain.outputs.obtained == 'true'
+        continue-on-error: true
+        run: |
+          echo "=============================================="
+          echo "=== ATTEMPTING TO COMMIT EXTRACTED FILES ==="
+          echo "=== (This step is optional — if it fails, ==="
+          echo "===  the APK is already built and uploaded) ==="
+          echo "=============================================="
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit — files already match zip contents"
+            exit 0
+          fi
+
+          echo "Committing extracted files..."
+          git commit -m "Extract project ZIP (auto) [skip ci]"
+
+          echo "Pushing to repo..."
+          if git push 2>&1; then
+            echo "SUCCESS — extracted files committed to repo"
+            echo "Future builds will use these files directly (no zip needed)"
+          else
+            echo ""
+            echo "============================================"
+            echo "PUSH FAILED — but the APK is already built."
+            echo "============================================"
+            echo "This is usually a permissions issue. To fix it so future builds"
+            echo "auto-commit extracted files:"
+            echo ""
+            echo "  1. Go to: Settings → Actions → General → Workflow permissions"
+            echo "  2. Select: Read and write permissions"
+            echo "  3. Save"
+            echo ""
+            echo "For now, the build still works — the zip just gets re-extracted"
+            echo "each time, which takes about 1 second. No action required."
+          fi
