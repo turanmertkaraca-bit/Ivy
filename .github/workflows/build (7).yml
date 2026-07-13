@@ -311,6 +311,10 @@ jobs:
           else
             echo "WARNING: fetch_shaders.sh not found"
           fi
+                - name: Clean build cache (fix KSP errors)
+        run: |
+          echo "Cleaning build cache to resolve KSP compilation issues..."
+          ./gradlew clean
 
       # ====================================================================
       # STEP 5: Build the APK
